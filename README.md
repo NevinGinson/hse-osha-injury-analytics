@@ -2,7 +2,7 @@
 
 Interactive Streamlit dashboard analyzing OSHA severe workplace injury reports (2015–2017).
 
-## 🔍 Project Goal
+##  Project Goal
 Build a practical HSE-focused analytics dashboard that helps explore:
 - injury patterns
 - high-risk industries
@@ -12,7 +12,7 @@ Build a practical HSE-focused analytics dashboard that helps explore:
 
 Designed to demonstrate EHS / HSE data analytics skills using Python + Streamlit.
 
-## 📊 Features
+##  Features
 - Top industries by severe injuries
 - Top injury types
 - State distribution tables
@@ -20,19 +20,19 @@ Designed to demonstrate EHS / HSE data analytics skills using Python + Streamlit
 - Interactive charts (Plotly)
 - Clean dashboard layout
 
-## 🧠 Tech Stack
+##  Tech Stack
 - Python
 - Pandas
 - Streamlit
 - Plotly
 
-## 📁 Dataset
+##  Dataset
 OSHA Severe Injury Reports (Public dataset, Kaggle)
 
 ~22,000 injury reports  
 Period: 2015–2017
 
-## ▶️ Run Locally
+##  Run Locally
 
 ```bash
 pip install -r requirements.txt
