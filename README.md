@@ -1,5 +1,7 @@
 # OSHA Severe Injury Analytics Dashboard
 
+https://hse-osha-injury-analytics-55ntxd34atyewwsrrtz49g.streamlit.app/
+
 Interactive Streamlit dashboard analyzing OSHA severe workplace injury reports (2015–2017).
 
 ##  Project Goal
