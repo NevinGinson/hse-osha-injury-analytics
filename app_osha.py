@@ -10,24 +10,29 @@ st.set_page_config(page_title="OSHA Severe Injury Dashboard", layout="wide")
 
 ROOT = Path(__file__).resolve().parent
 DATA_PATH = ROOT / "data" / "severeinjury.csv"
+
+# Existing Tier-1 risk score (optional)
 RISK_PATH = ROOT / "outputs" / "osha_with_risk_score.csv"
 
+# Tier-2 artifacts (created by your src/04 and src/05 scripts)
+TIER2_PRED_PATH = ROOT / "outputs" / "tier2_baseline_predictions.csv"
+TIER2_MODEL_PATH = ROOT / "outputs" / "tier2_text_model.joblib"  # optional (if you save it)
+
 st.title("OSHA Severe Injury Analytics Dashboard")
-st.caption("Interactive safety analytics + risk scoring from OSHA severe injury records.")
+st.caption("Interactive safety analytics + risk scoring + Tier-2 NLP baseline from OSHA severe injury records.")
 
 # -----------------------------
 # Load data (robust)
 # -----------------------------
 @st.cache_data
 def load_csv_safely(path: Path):
-    # common encodings for Kaggle/OSHA-like files
     for enc in ["utf-8", "utf-8-sig", "latin1", "cp1252"]:
         try:
             return pd.read_csv(path, encoding=enc)
         except UnicodeDecodeError:
             continue
-    # last resort: ignore bad characters
     return pd.read_csv(path, encoding="utf-8", errors="replace")
+
 
 if not DATA_PATH.exists():
     st.error(f"Dataset not found at: {DATA_PATH}\n\nPut severeinjury.csv inside: data/")
@@ -39,14 +44,13 @@ df = load_csv_safely(DATA_PATH)
 # Column guessing (works even if names differ)
 # -----------------------------
 # NOTE: The OSHA Severe Injury dataset commonly uses columns like:
-# EventDate, State, Primary NAICS, NatureTitle, EventTitle, SourceTitle, etc.
+# EventDate, State, Primary NAICS, NatureTitle, EventTitle, Final Narrative, etc.
 
 def find_col(possible_names):
     lower_cols = {c.lower(): c for c in df.columns}
     for name in possible_names:
         if name.lower() in lower_cols:
             return lower_cols[name.lower()]
-    # fuzzy contains
     for c in df.columns:
         cl = c.lower()
         for name in possible_names:
@@ -54,45 +58,41 @@ def find_col(possible_names):
                 return c
     return None
 
-# “Industry”: use NAICS if present (better than nothing)
+
 industry_col = find_col([
     "primary naics", "naics", "naics code", "primary_naics",
     "industry", "industry_description", "naics_title", "industry name"
 ])
 
-# “Injury type”: OSHA dataset uses Nature / NatureTitle
 injury_col = find_col([
     "naturetitle", "nature title", "nature", "injury", "injury_description",
     "eventtitle", "event title"
 ])
 
-# State + Date
-state_col = find_col(["state", "state_name"])  # usually "State"
+state_col = find_col(["state", "state_name"])
 date_col  = find_col(["eventdate", "event date", "date", "incident_date", "event_date", "report_date"])
 
-# Helpful extra columns for scoring/insights (optional)
-naics_title_col = find_col(["naics title", "naics_title", "industry title"])  # not always present
-hospital_col = find_col(["hospitalized", "hospitalised", "hospitalized?"])
-amputation_col = find_col(["amputation", "amputated"])
-inspection_col = find_col(["inspection", "inspected"])
-narrative_col = find_col(["final narrative", "narrative", "description", "incident description"])
+naics_title_col   = find_col(["naics title", "naics_title", "industry title"])
+hospital_col      = find_col(["hospitalized", "hospitalised", "hospitalized?"])
+amputation_col    = find_col(["amputation", "amputated"])
+inspection_col    = find_col(["inspection", "inspected"])
+narrative_col     = find_col(["final narrative", "narrative", "description", "incident description"])
 
 # -----------------------------
-# Sidebar filters (optional)
+# Sidebar filters
 # -----------------------------
 st.sidebar.header("Filters")
-
 df_filtered = df.copy()
 
 if state_col:
     states = sorted(df_filtered[state_col].dropna().astype(str).unique().tolist())
-    pick_states = st.sidebar.multiselect("State", states, default=states[:0])
+    pick_states = st.sidebar.multiselect("State", states, default=[])
     if pick_states:
         df_filtered = df_filtered[df_filtered[state_col].astype(str).isin(pick_states)]
 
 if industry_col:
     inds = sorted(df_filtered[industry_col].dropna().astype(str).unique().tolist())
-    pick_inds = st.sidebar.multiselect("Industry", inds, default=inds[:0])
+    pick_inds = st.sidebar.multiselect("Industry / NAICS", inds, default=[])
     if pick_inds:
         df_filtered = df_filtered[df_filtered[industry_col].astype(str).isin(pick_inds)]
 
@@ -102,7 +102,9 @@ st.sidebar.write("Rows:", len(df_filtered))
 # -----------------------------
 # Tabs
 # -----------------------------
-tab1, tab2, tab3 = st.tabs(["Overview + KPIs", "Trends", "Risk Score Intelligence"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["Overview + KPIs", "Trends", "Risk Score Intelligence", "Tier-2 NLP Model"]
+)
 
 # -----------------------------
 # Tab 1: Overview + KPIs
@@ -118,10 +120,9 @@ with tab1:
         c2.metric("States covered", "N/A")
 
     if industry_col:
-        # With OSHA dataset this is usually NAICS code
-        c3.metric("Industries covered", f"{df_filtered[industry_col].nunique():,}")
+        c3.metric("Industries/NAICS covered", f"{df_filtered[industry_col].nunique():,}")
     else:
-        c3.metric("Industries covered", "N/A")
+        c3.metric("Industries/NAICS covered", "N/A")
 
     st.divider()
 
@@ -132,11 +133,10 @@ with tab1:
 
         top_ind = df_filtered[industry_col].astype(str).value_counts().head(15).reset_index()
         top_ind.columns = ["industry", "count"]
-
         fig = px.bar(top_ind, x="count", y="industry", orientation="h")
         st.plotly_chart(fig, use_container_width=True)
 
-        # Small recruiter-friendly extra: show % hospitalized / amputation by NAICS (if columns exist)
+        # severity signals by NAICS (if columns exist)
         if hospital_col or amputation_col:
             st.caption("Quick severity signals by NAICS (based on available fields).")
             tmp = df_filtered.copy()
@@ -145,35 +145,32 @@ with tab1:
                 s = s.astype(str).str.strip().str.lower()
                 return s.isin(["1", "true", "t", "yes", "y"]).astype(int)
 
-            if hospital_col:
-                tmp["_hosp"] = _to01(tmp[hospital_col])
-            else:
-                tmp["_hosp"] = 0
-
-            if amputation_col:
-                tmp["_amp"] = _to01(tmp[amputation_col])
-            else:
-                tmp["_amp"] = 0
+            tmp["_hosp"] = _to01(tmp[hospital_col]) if hospital_col else 0
+            tmp["_amp"]  = _to01(tmp[amputation_col]) if amputation_col else 0
 
             sev = (
                 tmp.groupby(industry_col)
-                .agg(incidents=(industry_col, "size"), hospitalized_rate=("_hosp", "mean"), amputation_rate=("_amp", "mean"))
+                .agg(incidents=(industry_col, "size"),
+                     hospitalized_rate=("_hosp", "mean"),
+                     amputation_rate=("_amp", "mean"))
                 .sort_values("incidents", ascending=False)
                 .head(10)
                 .reset_index()
             )
             sev["hospitalized_rate"] = (sev["hospitalized_rate"] * 100).round(1)
-            sev["amputation_rate"] = (sev["amputation_rate"] * 100).round(1)
-            sev = sev.rename(columns={industry_col: "naics_or_industry", "hospitalized_rate": "% hospitalized", "amputation_rate": "% amputations"})
+            sev["amputation_rate"]   = (sev["amputation_rate"] * 100).round(1)
+            sev = sev.rename(columns={
+                industry_col: "naics_or_industry",
+                "hospitalized_rate": "% hospitalized",
+                "amputation_rate": "% amputations"
+            })
             st.dataframe(sev, use_container_width=True)
     else:
         st.info("Industry/NAICS column not detected in this dataset.")
 
-    # Top Injury Types (Nature / NatureTitle)
+    # Top Injury Types
     if injury_col:
-        label = "Top Nature / Injury Types (by incident count)"
-        st.subheader(label)
-
+        st.subheader("Top Nature / Injury Types (by incident count)")
         top_inj = df_filtered[injury_col].astype(str).value_counts().head(15).reset_index()
         top_inj.columns = ["injury", "count"]
         fig2 = px.bar(top_inj, x="count", y="injury", orientation="h")
@@ -206,7 +203,6 @@ with tab2:
         else:
             dft["year"] = dft[date_col].dt.year
             trend = dft["year"].value_counts().sort_index()
-
             st.line_chart(trend)
             st.caption("Yearly incident count (based on parsed date column).")
     else:
@@ -217,41 +213,25 @@ with tab2:
 # -----------------------------
 with tab3:
     st.subheader("Risk Score Intelligence")
-    st.caption("If outputs/osha_with_risk_score.csv is missing (common on Streamlit Cloud), the app will compute a risk score on the fly.")
+    st.caption("If outputs/osha_with_risk_score.csv is missing (common on Streamlit Cloud), the app computes an explainable risk score on the fly.")
 
     def _to01(series: pd.Series) -> pd.Series:
         s = series.fillna(0).astype(str).str.strip().str.lower()
         return s.isin(["1", "true", "t", "yes", "y"]).astype(int)
 
     def build_risk_df(source_df: pd.DataFrame) -> pd.DataFrame:
-        """Create a simple, transparent risk score from OSHA fields.
-        This is intentionally explainable (good for recruiters):
-        - +4 if amputation
-        - +3 if hospitalized
-        - +1 if inspection
-        - +keyword weights from narrative (if present)
-        """
         rdf = source_df.copy()
 
-        # Ensure helper columns exist
         rdf["_amp"] = _to01(rdf[amputation_col]) if amputation_col else 0
         rdf["_hosp"] = _to01(rdf[hospital_col]) if hospital_col else 0
         rdf["_insp"] = _to01(rdf[inspection_col]) if inspection_col else 0
 
-        # Keyword-based signal from narrative (optional)
         if narrative_col:
             text = rdf[narrative_col].fillna("").astype(str).str.lower()
             kw = {
-                "fatal": 5,
-                "death": 5,
-                "amput": 4,
-                "hospital": 3,
-                "fractur": 2,
-                "burn": 2,
-                "lacerat": 1,
-                "crush": 2,
-                "electr": 2,
-                "fall": 1,
+                "fatal": 5, "death": 5, "amput": 4, "hospital": 3,
+                "fractur": 2, "burn": 2, "lacerat": 1, "crush": 2,
+                "electr": 2, "fall": 1,
             }
             score_kw = 0
             for k, w in kw.items():
@@ -260,10 +240,8 @@ with tab3:
         else:
             rdf["_kw"] = 0
 
-        # Final score (bounded for nicer plots)
         rdf["risk_score"] = (1 + 4 * rdf["_amp"] + 3 * rdf["_hosp"] + 1 * rdf["_insp"] + rdf["_kw"]).clip(1, 20)
 
-        # Standardized names for grouping
         if industry_col:
             rdf["industry"] = rdf[industry_col].astype(str)
         if injury_col:
@@ -276,28 +254,21 @@ with tab3:
 
         return rdf
 
-    # Prefer precomputed CSV (local dev), otherwise compute live (Streamlit Cloud)
     if RISK_PATH.exists():
         rdf = load_csv_safely(RISK_PATH)
         if "risk_score" not in rdf.columns:
-            st.warning("Risk file exists but has no 'risk_score' column. Computing risk score live instead.")
+            st.warning("Risk file exists but has no 'risk_score'. Computing live score instead.")
             rdf = build_risk_df(df_filtered)
         else:
-            # normalize for group charts
             if industry_col and "industry" not in rdf.columns:
                 rdf["industry"] = rdf.get(industry_col, "").astype(str)
             if injury_col and "injury" not in rdf.columns:
                 rdf["injury"] = rdf.get(injury_col, "").astype(str)
     else:
-        st.info(
-            "Risk score file not found in the repo (this is normal on Streamlit Cloud unless you commit the outputs folder). "
-            "Computing risk score live now."
-        )
+        st.info("Risk score file not found in repo (normal on Streamlit Cloud). Computing risk score live now.")
         rdf = build_risk_df(df_filtered)
 
-    # ---- Visuals ----
     c1, c2 = st.columns([1, 1])
-
     with c1:
         st.markdown("### Risk Score Distribution")
         fig = px.histogram(rdf, x="risk_score", nbins=20)
@@ -311,7 +282,6 @@ with tab3:
 
     st.divider()
 
-    # High-risk industries / NAICS
     if "industry" in rdf.columns:
         st.markdown("### Top High-Risk NAICS / Industries (mean risk score)")
         top_ind = (
@@ -326,7 +296,6 @@ with tab3:
     else:
         st.info("No industry/NAICS column detected for risk grouping.")
 
-    # High-risk injury types
     if "injury" in rdf.columns:
         st.markdown("### Top High-Risk Injury / Nature Types (mean risk score)")
         top_inj = (
@@ -341,7 +310,6 @@ with tab3:
     else:
         st.info("No injury/nature column detected for risk grouping.")
 
-    # Optional: download scored data
     st.divider()
     st.markdown("### Download")
     st.download_button(
@@ -350,5 +318,60 @@ with tab3:
         file_name="osha_scored.csv",
         mime="text/csv",
     )
+
+# -----------------------------
+# Tab 4: Tier-2 NLP Baseline (ML)
+# -----------------------------
+with tab4:
+    st.subheader("Tier-2 NLP Model (Baseline)")
+    st.caption("Baseline: TF-IDF + Logistic Regression trained in src/05_train_text_model.py")
+
+    if not TIER2_PRED_PATH.exists():
+        st.warning(
+            "Tier-2 predictions file not found.\n\n"
+            "Run:\n"
+            "python src/04_make_target.py\n"
+            "python src/05_train_text_model.py\n\n"
+            f"Expected: {TIER2_PRED_PATH}"
+        )
+    else:
+        pdf = load_csv_safely(TIER2_PRED_PATH)
+
+        # normalize column names (in case you saved slightly different headers)
+        ren = {}
+        for col in pdf.columns:
+            if col.lower() in ["true", "ytrue", "y_true"]:
+                ren[col] = "y_true"
+            if col.lower() in ["pred", "ypred", "y_pred"]:
+                ren[col] = "y_pred"
+        if ren:
+            pdf = pdf.rename(columns=ren)
+
+        if {"y_true", "y_pred"}.issubset(set(pdf.columns)):
+            acc = (pdf["y_true"] == pdf["y_pred"]).mean()
+            st.metric("Test accuracy (baseline)", f"{acc:.3f}")
+
+            cm = pd.crosstab(pdf["y_true"], pdf["y_pred"], rownames=["true"], colnames=["pred"])
+            st.markdown("### Confusion matrix (counts)")
+            st.dataframe(cm, use_container_width=True)
+
+        st.markdown("### Example predictions")
+        st.dataframe(pdf.head(30), use_container_width=True)
+
+        st.divider()
+        st.markdown("### Try your own text (optional live prediction)")
+        st.caption("If you save a joblib model to outputs/tier2_text_model.joblib, we can predict here.")
+        user_text = st.text_area("Paste an incident narrative", height=140)
+
+        if user_text.strip() and TIER2_MODEL_PATH.exists():
+            try:
+                from joblib import load
+                model = load(TIER2_MODEL_PATH)
+                pred = model.predict([user_text])[0]
+                st.success(f"Prediction: {'HIGH severity' if int(pred) == 1 else 'NOT high severity'}")
+            except Exception as e:
+                st.error(f"Model loaded but prediction failed: {e}")
+        elif user_text.strip() and not TIER2_MODEL_PATH.exists():
+            st.info("No saved model found yet. (Optional) Save it from src/05_train_text_model.py as outputs/tier2_text_model.joblib.")
 
 st.success("Dashboard ready.")
