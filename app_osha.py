@@ -21,30 +21,33 @@ DATA_PATH = ROOT / "data" / "severeinjury.csv"
 
 # (Optional) precomputed files (if you committed them OR generated locally)
 RISK_PATH = ROOT / "outputs" / "osha_with_risk_score.csv"
+
+# Tier-2 NLP artifacts (from src/04_make_target.py + src/05_train_text_model.py)
 TIER2_PRED_PATH = ROOT / "outputs" / "tier2_baseline_predictions.csv"
 TIER2_MODEL_PATH = ROOT / "outputs" / "tier2_text_model.joblib"
 
-st.title("OSHA Severe Injury Analytics Dashboard")
+# A4: Structured ML artifacts (your structured model)
+# Keep these names consistent with your training script output
+STRUCT_MODEL_PATH = ROOT / "outputs" / "tier2_structured_model.joblib"
 
+st.title("OSHA Severe Injury Analytics Dashboard")
 st.caption(
-    "A practical safety analytics demo: KPIs + simple risk scoring + a text classifier that flags potentially severe incidents."
+    "A safety analytics demo: KPIs + explainable risk scoring + text-based severity flagging + structured ML prediction."
 )
 
 # -----------------------------
-# Recruiter-friendly “What is this?” (TOP)
+# Quick intro (keep short, recruiter-readable)
 # -----------------------------
 with st.container():
     st.info(
-        "**What you’re looking at :**\n\n"
-        "This app turns OSHA severe injury records into **safety intelligence**.\n"
+        "**What this app does**\n\n"
         "- **Overview & KPIs:** where incidents happen (state / NAICS / injury nature)\n"
-        "- **Trends:** how incident counts change over time\n"
-        "- **Risk Score Intelligence:** an explainable score (based on hospitalization/amputation + keywords)\n"
-        "- **Tier-2 Text Model:** a simple model that reads an incident narrative and predicts whether it looks **high severity**\n\n"
-        "**Why it matters:** In real EHS work, this supports **incident triage**, **prioritizing investigations**, "
-        "and **early warning** from incoming reports."
+        "- **Trends:** how incident volume changes over time\n"
+        "- **Risk Score Intelligence:** transparent scoring using hospitalization/amputation + narrative keywords\n"
+        "- **Tier-2 Text Model:** predicts likely high severity from incident narrative text\n"
+        "- **Structured ML (A4):** predicts severity from structured fields (state/NAICS/nature + event/source titles + flags)\n\n"
+        "Focus: practical EHS workflows like triage, prioritization, and early warning."
     )
-
 
 # -----------------------------
 # Load data (robust)
@@ -102,6 +105,10 @@ hospital_col = find_col(["hospitalized", "hospitalised", "hospitalized?"])
 amputation_col = find_col(["amputation", "amputated"])
 inspection_col = find_col(["inspection", "inspected"])
 narrative_col = find_col(["final narrative", "narrative", "description", "incident description"])
+
+# A4 fix: these two were missing in your live prediction payload
+event_title_col = find_col(["eventtitle", "event title", "event_title"])
+source_title_col = find_col(["sourcetitle", "source title", "source_title"])
 
 
 # -----------------------------
@@ -171,6 +178,41 @@ def safe_unique_count(s: pd.Series) -> int:
         return 0
 
 
+def _infer_required_cols(model_obj):
+    """
+    Best-effort: detect which dataframe columns the trained pipeline expects.
+    Works for many sklearn pipelines (feature_names_in_).
+    """
+    # pipeline itself might have it
+    cols = getattr(model_obj, "feature_names_in_", None)
+    if cols is not None:
+        return list(cols)
+
+    # try steps
+    named_steps = getattr(model_obj, "named_steps", None)
+    if isinstance(named_steps, dict):
+        for step in named_steps.values():
+            cols = getattr(step, "feature_names_in_", None)
+            if cols is not None:
+                return list(cols)
+
+    # fallback: use available known columns
+    guess = []
+    for c in [
+        state_col, industry_col, injury_col, event_title_col, source_title_col,
+        hospital_col, amputation_col, inspection_col
+    ]:
+        if c:
+            guess.append(c)
+
+    # also include canonical names if your training used them directly
+    for c in ["EventTitle", "SourceTitle"]:
+        if c not in guess:
+            guess.append(c)
+
+    return guess
+
+
 # -----------------------------
 # Sidebar filters
 # -----------------------------
@@ -193,34 +235,33 @@ if industry_col:
 st.sidebar.divider()
 st.sidebar.write("Rows:", len(df_filtered))
 
-with st.sidebar.expander("Glossary "):
+with st.sidebar.expander("Glossary"):
     st.markdown(
-        "- **NAICS**: an industry classification code\n"
-        "- **Nature / Injury type**: what kind of injury happened\n"
-        "- **Risk score**: a simple number (1–20) estimating severity using clear rules\n"
-        "- **Text model**: a basic classifier that reads a narrative and predicts if it looks high severity\n"
-        "- **Confusion matrix**: shows correct vs wrong predictions\n"
-        "- **Accuracy**: percent of total predictions that were correct (can look high even if classes are imbalanced)"
+        "- **NAICS**: industry classification code\n"
+        "- **Nature / Injury type**: injury category in the dataset\n"
+        "- **Risk score**: a 1–20 score from transparent rules (not a black-box)\n"
+        "- **Text model**: classifier using incident narratives\n"
+        "- **Confusion matrix**: correct vs incorrect prediction counts\n"
+        "- **Accuracy**: overall correctness (can look high when classes are imbalanced)\n"
+        "- **Structured ML**: model trained on fields like NAICS/state/nature + titles + flags"
     )
 
 
 # -----------------------------
 # Tabs
 # -----------------------------
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Overview + KPIs", "Trends", "Risk Score Intelligence", "Tier-2 Text Model"]
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Overview + KPIs", "Trends", "Risk Score Intelligence", "Tier-2 Text Model", "Structured ML (A4)"]
 )
-
 
 # -----------------------------
 # Tab 1: Overview + KPIs
 # -----------------------------
 with tab1:
-    st.subheader("Overview + KPIs (What’s happening, where?)")
-    st.caption("This section answers: **Where are incidents happening and what types are common?**")
+    st.subheader("Overview + KPIs")
+    st.caption("Where incidents happen and which categories appear most often.")
 
     c1, c2, c3 = st.columns(3)
-
     c1.metric("Total Records", f"{len(df_filtered):,}")
     c2.metric("States covered", f"{safe_unique_count(df_filtered[state_col]) if state_col else 'N/A'}")
     c3.metric("Industries / NAICS covered", f"{safe_unique_count(df_filtered[industry_col]) if industry_col else 'N/A'}")
@@ -238,7 +279,7 @@ with tab1:
 
         # severity signals by NAICS (if columns exist)
         if hospital_col or amputation_col:
-            st.caption("Extra: severity signals by NAICS (based on available fields).")
+            st.caption("Severity signals by NAICS (based on available fields).")
             tmp = df_filtered.copy()
             tmp["_hosp"] = _to01(tmp[hospital_col]) if hospital_col else 0
             tmp["_amp"] = _to01(tmp[amputation_col]) if amputation_col else 0
@@ -290,8 +331,8 @@ with tab1:
 # Tab 2: Trends
 # -----------------------------
 with tab2:
-    st.subheader("Trends (How does it change over time?)")
-    st.caption("This section answers: **Are incidents increasing or decreasing year-by-year?**")
+    st.subheader("Trends")
+    st.caption("Year-by-year incident count (based on the event date field).")
 
     if date_col:
         dft = df_filtered.copy()
@@ -304,35 +345,31 @@ with tab2:
             dft["year"] = dft[date_col].dt.year
             trend = dft["year"].value_counts().sort_index()
             st.line_chart(trend)
-            st.caption("Yearly incident count (based on parsed date column).")
     else:
-        st.info("Date column not detected, so trend chart is unavailable.")
+        st.info("Date column not detected, so the trend chart is unavailable.")
 
 
 # -----------------------------
 # Tab 3: Risk Score Intelligence
 # -----------------------------
 with tab3:
-    st.subheader("Risk Score Intelligence (Explainable severity signals)")
-    st.caption(
-        "This is **not** a black-box model. It’s an **explainable score** using fields like hospitalization/amputation + keywords."
-    )
+    st.subheader("Risk Score Intelligence")
+    st.caption("A transparent score based on hospitalization/amputation + narrative keyword signals.")
 
-    with st.expander("What is the risk score ?", expanded=True):
+    with st.expander("Risk score rules", expanded=True):
         st.markdown(
-            "We compute a simple score from **1 to 20**:\n\n"
-            "- **+4** if the record indicates **amputation**\n"
-            "- **+3** if it indicates **hospitalization**\n"
-            "- **+1** if there was an **inspection** (if available)\n"
-            "- Plus a **keyword signal** from narrative text (if available)\n\n"
-            "**Use case:** Helps EHS teams quickly prioritize which incidents may need faster escalation."
+            "- **+4** if **amputation**\n"
+            "- **+3** if **hospitalization**\n"
+            "- **+1** if **inspection** (if available)\n"
+            "- Plus a **keyword signal** from narrative text (if available)\n"
+            "- Final score is clipped to **1–20**"
         )
 
     # Prefer precomputed CSV, otherwise compute live
     if RISK_PATH.exists():
         rdf = load_csv_safely(RISK_PATH)
         if "risk_score" not in rdf.columns:
-            st.warning("Risk file exists but has no 'risk_score' column. Computing risk score live instead.")
+            st.warning("Risk file exists but has no 'risk_score' column. Computing live score instead.")
             rdf = build_risk_df(df_filtered)
         else:
             # normalize columns for grouping
@@ -341,7 +378,7 @@ with tab3:
             if injury_col and "injury" not in rdf.columns and injury_col in rdf.columns:
                 rdf["injury"] = rdf[injury_col].astype(str)
     else:
-        st.info("No precomputed risk file found in repo (normal on Streamlit Cloud). Computing risk score live now.")
+        st.info("No precomputed risk file found in repo. Computing risk score live now.")
         rdf = build_risk_df(df_filtered)
 
     c1, c2 = st.columns([1, 1])
@@ -370,8 +407,6 @@ with tab3:
         )
         fig2 = px.bar(top_ind, x="risk_score", y="industry", orientation="h")
         st.plotly_chart(fig2, use_container_width=True)
-    else:
-        st.info("No industry/NAICS column detected for risk grouping.")
 
     if "injury" in rdf.columns:
         st.markdown("### Top High-Risk Injury / Nature Types (mean risk score)")
@@ -384,8 +419,6 @@ with tab3:
         )
         fig3 = px.bar(top_inj, x="risk_score", y="injury", orientation="h")
         st.plotly_chart(fig3, use_container_width=True)
-    else:
-        st.info("No injury/nature column detected for risk grouping.")
 
     st.divider()
     st.markdown("### Download")
@@ -401,64 +434,35 @@ with tab3:
 # Tab 4: Tier-2 Text Model
 # -----------------------------
 with tab4:
-    st.subheader("Tier-2 Text Model (Severity flag from narrative text)")
-    st.caption("This section demonstrates a practical workflow: **incident narrative → severity flag**.")
+    st.subheader("Tier-2 Text Model")
+    st.caption("Incident narrative → predicted severity flag (baseline).")
 
-    with st.expander("What does this model do ?", expanded=True):
-        st.markdown(
-            "Many companies receive incident reports as **free text** (narratives). "
-            "This model reads that text and predicts whether the incident *looks like high severity*.\n\n"
-            "**Use case examples:**\n"
-            "- Auto-flag severe cases for faster investigation\n"
-            "- Help safety teams triage large volumes of reports\n"
-            "- Create early-warning signals from narrative descriptions\n\n"
-            "**Important:** This is a baseline demo model. In real deployment, it needs careful validation and governance."
-        )
-
-    # Show evaluation results from predictions file (works on Streamlit Cloud if you committed outputs/* OR created them)
     if not TIER2_PRED_PATH.exists():
         st.warning(
             "Tier-2 predictions file not found.\n\n"
-            "**If you are running locally:** generate it using:\n"
-            "`python src/04_make_target.py`\n"
-            "`python src/05_train_text_model.py`\n\n"
-            "**If you are on Streamlit Cloud:** commit `outputs/tier2_baseline_predictions.csv` to the repo "
-            "(or keep the on-the-fly demo only)."
+            "Generate locally:\n"
+            "- `python src/04_make_target.py`\n"
+            "- `python src/05_train_text_model.py`\n\n"
+            "If you want it visible on Streamlit Cloud, commit `outputs/tier2_baseline_predictions.csv`."
         )
     else:
         pred_df = load_csv_safely(TIER2_PRED_PATH)
 
         required_cols = {"text", "y_true", "y_pred"}
         if not required_cols.issubset(set(pred_df.columns)):
-            st.error(
-                f"Predictions file exists but is missing required columns: {required_cols}. "
-                f"Found: {list(pred_df.columns)}"
-            )
+            st.error(f"Predictions file is missing required columns: {required_cols}. Found: {list(pred_df.columns)}")
         else:
-            # Compute metrics in-app (no ML knowledge required)
             y_true = pred_df["y_true"].astype(int).values
             y_pred = pred_df["y_pred"].astype(int).values
-
             acc = float((y_true == y_pred).mean())
 
-            # Confusion matrix counts
-            # rows=true, cols=pred
             tn = int(((y_true == 0) & (y_pred == 0)).sum())
             fp = int(((y_true == 0) & (y_pred == 1)).sum())
             fn = int(((y_true == 1) & (y_pred == 0)).sum())
             tp = int(((y_true == 1) & (y_pred == 1)).sum())
 
-            st.markdown("### Model performance ")
-            st.metric("Test accuracy (baseline)", f"{acc:.3f}")
-
-            with st.expander("How to read these numbers "):
-                st.markdown(
-                    "- **Accuracy**: % of all predictions that were correct.\n"
-                    "- **TP (true positives)**: model correctly flagged high severity.\n"
-                    "- **FN (false negatives)**: model missed a high severity case (risky in real safety workflows).\n"
-                    "- **FP (false positives)**: model flagged something as high severity but it wasn’t.\n\n"
-                    "**EHS note:** In many safety systems, reducing **false negatives** is often more important than maximizing accuracy."
-                )
+            st.markdown("### Performance")
+            st.metric("Test accuracy", f"{acc:.3f}")
 
             st.markdown("### Confusion matrix (counts)")
             cm_df = pd.DataFrame(
@@ -473,36 +477,18 @@ with tab4:
             st.dataframe(pred_df.sample(show_n, random_state=42), use_container_width=True)
 
     st.divider()
-    st.markdown("### Try your own text (live prediction)")
-
-    st.caption(
-        "Type a short incident narrative. The app will predict whether it looks **high severity**. "
-        "Tip: include details like hospitalization/amputation/fall/crush/electrical to see how the model reacts."
-    )
-
-    example_col1, example_col2 = st.columns(2)
-    with example_col1:
-        st.markdown("**Example (high severity):**")
-        st.code("Employee’s hand was caught in a hydraulic press causing finger amputation and emergency hospitalization.")
-    with example_col2:
-        st.markdown("**Example (not high severity):**")
-        st.code("Employee slipped and had a minor bruise, returned to work the same day.")
+    st.markdown("### Live prediction (text)")
 
     user_text = st.text_area("Paste an incident narrative", height=110)
 
-    # If a saved model exists, use it. Otherwise, explain how to create it.
     if not TIER2_MODEL_PATH.exists():
         st.info(
-            "No saved model found yet.\n\n"
-            "To enable live prediction:\n"
-            "- Run locally: `python src/05_train_text_model.py`\n"
-            "- Ensure it saves: `outputs/tier2_text_model.joblib`\n"
-            "- Commit/push that file if you want it on Streamlit Cloud (optional).\n\n"
-            "**Good news:** Your dashboard still demonstrates the workflow using the evaluation outputs."
+            "Model file not found: `outputs/tier2_text_model.joblib`.\n\n"
+            "To enable live prediction, run `python src/05_train_text_model.py` and ensure it saves the joblib file."
         )
     else:
         if joblib_load is None:
-            st.error("joblib is not available in this environment. Add `joblib` to requirements.txt.")
+            st.error("joblib is not available. Add `joblib` to requirements.txt.")
         else:
             try:
                 model = joblib_load(TIER2_MODEL_PATH)
@@ -516,19 +502,102 @@ with tab4:
                         proba = None
 
                     if pred == 1:
-                        st.error("Prediction: HIGH severity (flag for fast review)")
+                        st.error("Prediction: HIGH severity")
                     else:
-                        st.success("Prediction: NOT high severity")
+                        st.success("Prediction: Lower severity")
 
                     if proba is not None:
-                        st.caption(f"Model confidence (approx): {proba:.2f} probability of high severity")
-
-                    st.caption(
-                        "Interpretation: This is a triage signal — it helps prioritize review, "
-                        "but final decisions should be made by safety professionals."
-                    )
+                        st.caption(f"Probability(high severity) ≈ {proba:.2f}")
             except Exception as e:
                 st.error(f"Could not load/use the model file: {e}")
+
+
+# -----------------------------
+# Tab 5: Structured ML (A4)
+# -----------------------------
+with tab5:
+    st.subheader("Structured ML (A4)")
+    st.caption("Structured fields → predicted severity (uses your saved structured model).")
+
+    st.markdown("### Live prediction")
+
+    if not STRUCT_MODEL_PATH.exists():
+        st.info(
+            "Structured model file not found: `outputs/tier2_structured_model.joblib`.\n\n"
+            "Train/export your structured model and save it with that filename to enable this tab."
+        )
+    else:
+        if joblib_load is None:
+            st.error("joblib is not available. Add `joblib` to requirements.txt.")
+        else:
+            try:
+                model = joblib_load(STRUCT_MODEL_PATH)
+                required_cols = _infer_required_cols(model)
+
+                input_row = {}
+
+                # Categorical selectors
+                if state_col:
+                    options = sorted(df[state_col].dropna().astype(str).unique().tolist())
+                    input_row[state_col] = st.selectbox("State", options)
+
+                if industry_col:
+                    options = sorted(df[industry_col].dropna().astype(str).unique().tolist())
+                    input_row[industry_col] = st.selectbox("NAICS / Industry", options)
+
+                if injury_col:
+                    options = sorted(df[injury_col].dropna().astype(str).unique().tolist())
+                    input_row[injury_col] = st.selectbox("Nature / Injury type", options)
+
+                # These two were the reason for your error
+                if event_title_col:
+                    options = sorted(df[event_title_col].dropna().astype(str).unique().tolist())
+                    input_row[event_title_col] = st.selectbox("Event title", options)
+                else:
+                    # still allow a manual entry so the pipeline can be satisfied
+                    input_row["EventTitle"] = st.text_input("Event title", value="")
+
+                if source_title_col:
+                    options = sorted(df[source_title_col].dropna().astype(str).unique().tolist())
+                    input_row[source_title_col] = st.selectbox("Source title", options)
+                else:
+                    input_row["SourceTitle"] = st.text_input("Source title", value="")
+
+                # Flags
+                if hospital_col:
+                    input_row[hospital_col] = 1 if st.checkbox("Hospitalized") else 0
+                if amputation_col:
+                    input_row[amputation_col] = 1 if st.checkbox("Amputation") else 0
+                if inspection_col:
+                    input_row[inspection_col] = 1 if st.checkbox("Inspection") else 0
+
+                if st.button("Predict severity (structured)"):
+                    x = pd.DataFrame([input_row])
+
+                    # Ensure required columns exist
+                    for col in required_cols:
+                        if col not in x.columns:
+                            if any(k in col.lower() for k in ["hosp", "amput", "inspect", "hospital", "amputation"]):
+                                x[col] = 0
+                            else:
+                                x[col] = ""
+
+                    # Keep only required columns if possible (avoids column mismatch issues)
+                    try:
+                        x = x[required_cols]
+                    except Exception:
+                        pass
+
+                    try:
+                        p = float(model.predict_proba(x)[0][1])
+                        pred = int(p >= 0.5)
+                        label = "High severity" if pred == 1 else "Lower severity"
+                        st.success(f"{label} (p={p:.2f})")
+                    except Exception as e:
+                        st.error(f"Prediction failed: {e}")
+
+            except Exception as e:
+                st.error(f"Could not load/use the structured model file: {e}")
 
 
 st.success("Dashboard ready.")
