@@ -33,6 +33,12 @@ STRUCT_MODEL_PATH = ROOT / "outputs" / "tier2_structured_model.joblib"
 ANOMALY_SCORES_PATH = ROOT / "outputs" / "anomaly_scores.csv"
 ANOMALY_MODEL_PATH = ROOT / "outputs" / "anomaly_model.joblib"
 
+# 8: Cost + impact artifacts (from src/08_cost_model.py)
+COST_EST_PATH = ROOT / "outputs" / "cost_estimates.csv"
+
+# 9: Workflow queue artifacts (from src/09_workflow_sim.py)
+WORKFLOW_PATH = ROOT / "outputs" / "workflow_queue.csv"
+
 st.title("OSHA Severe Injury Analytics Dashboard")
 st.caption(
     "A safety analytics demo: KPIs + explainable risk scoring + text-based severity flagging + structured ML prediction + anomaly detection."
@@ -50,7 +56,9 @@ with st.container():
         "- **Tier-2 Text Model:** predicts likely high severity from incident narrative text\n"
         "- **Structured ML :** predicts severity from structured fields (state/NAICS/nature + event/source titles + flags)\n"
         "- **Anomaly Detection (B):** flags unusual records (rare combinations / outliers) for audit and investigation\n"
-        "- **Decision Layer:** converts signals into priority + action + SLA + owner\n\n"
+        "- **Decision Layer:** converts signals into priority + action + SLA + owner\n"
+        "- **Cost & Impact :** estimates cost burden, transparent assumptions)\n"
+        "- **Workflow Queue :** turns incidents into an EHS work queue \n\n"
         "Focus: practical EHS workflows like triage, prioritization, and early warning."
     )
 
@@ -213,7 +221,7 @@ def _infer_required_cols(model_obj):
 
 
 # -----------------------------
-# Decision Layer (EHS Triage) - NEW
+# Decision Layer (EHS Triage)
 # -----------------------------
 def decision_layer(
     risk_score=None,
@@ -338,13 +346,15 @@ with st.sidebar.expander("Glossary"):
         "- **Accuracy**: overall correctness (can look high when classes are imbalanced)\n"
         "- **Structured ML**: model trained on fields like NAICS/state/nature + titles + flags\n"
         "- **Anomaly detection**: highlights unusual records (outliers) for review\n"
-        "- **Decision layer**: turns signals into priority + action + SLA + owner"
+        "- **Decision layer**: turns signals into priority + action + SLA + owner\n"
+        "- **Cost & impact **: estimates cost burden \n"
+        "- **Workflow queue **: converts incidents into an EHS work queue"
     )
 
 # -----------------------------
 # Tabs
 # -----------------------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
     [
         "Overview + KPIs",
         "Trends",
@@ -353,6 +363,8 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
         "Structured ML ",
         "Anomaly Detection (B)",
         "Decision Layer",
+        "Cost & Impact ",
+        "Workflow Queue ",
     ]
 )
 
@@ -749,14 +761,13 @@ with tab6:
         )
 
 # -----------------------------
-# Tab 7: Decision Layer (NEW)
+# Tab 7: Decision Layer
 # -----------------------------
 with tab7:
     st.subheader("Decision Layer")
     st.caption("Converts signals into priority + recommended action + SLA + owner.")
 
-    # Recruiter-friendly toggle
-    recruiter_mode = st.checkbox("Recruiter mode (simple explanations)", value=True)
+    recruiter_mode = st.toggle("Explanation mode ", value=True)
 
     if recruiter_mode:
         st.info(
@@ -820,7 +831,6 @@ with tab7:
         _default_tp = 0.20
         _default_anom = 0.90
 
-    # Inputs (manual triage sandbox)
     c1, c2, c3 = st.columns(3)
     with c1:
         rs = st.slider("Risk score (1–20)", 1, 20, _default_rs)
@@ -863,7 +873,6 @@ with tab7:
 
     if reasons:
         st.markdown("### Why it was flagged")
-        # recruiter-friendly language tweak
         if recruiter_mode:
             mapped = []
             for r in reasons:
@@ -885,10 +894,8 @@ with tab7:
     st.markdown("### Apply decision layer to the dataset (top 50)")
     st.caption("This view helps a safety team decide what to review first.")
 
-    # Build risk score live
     rdf_local = build_risk_df(df_filtered)
 
-    # Try to add anomaly_score if available (best effort)
     if ANOMALY_SCORES_PATH.exists():
         try:
             adf = load_csv_safely(ANOMALY_SCORES_PATH)
@@ -897,7 +904,6 @@ with tab7:
         except Exception:
             pass
 
-    # Optional: load models (best effort)
     structured_model = None
     text_model = None
 
@@ -913,12 +919,9 @@ with tab7:
         except Exception:
             text_model = None
 
-    # Prepare probabilities if possible
-    # Structured model probs: requires correct columns; we do best effort
     if structured_model is not None:
         req_cols = _infer_required_cols(structured_model)
         x_struct = df_filtered.copy()
-        # add missing cols with safe defaults
         for col in req_cols:
             if col not in x_struct.columns:
                 if any(k in col.lower() for k in ["hosp", "amput", "inspect", "hospital", "amputation"]):
@@ -931,7 +934,6 @@ with tab7:
         except Exception:
             pass
 
-    # Text model probs: use narrative_col if exists
     if text_model is not None and narrative_col and narrative_col in df_filtered.columns:
         try:
             texts = df_filtered[narrative_col].fillna("").astype(str).values
@@ -940,7 +942,6 @@ with tab7:
         except Exception:
             pass
 
-    # Convert flags to 0/1 if present
     if hospital_col and hospital_col in df_filtered.columns:
         rdf_local["_hosp_flag"] = _to01(df_filtered[hospital_col])
     else:
@@ -971,7 +972,6 @@ with tab7:
     dec_cols = rdf_local.apply(_row_decision, axis=1)
     out_view = pd.concat([rdf_local, dec_cols], axis=1)
 
-    # Sort: P1 first, then P2, etc., and then by risk score
     priority_order = {"P1": 0, "P2": 1, "P3": 2, "P4": 3}
     out_view["_p_rank"] = out_view["priority"].map(priority_order).fillna(9).astype(int)
     out_view = out_view.sort_values(["_p_rank", "risk_score"], ascending=[True, False]).head(50)
@@ -991,6 +991,200 @@ with tab7:
         "Download triage queue (CSV)",
         data=out_view[show_cols].to_csv(index=False).encode("utf-8"),
         file_name="triage_queue_top50.csv",
+        mime="text/csv",
+    )
+
+# -----------------------------
+# Tab 8: Cost & Impact (8) — NON-ML
+# -----------------------------
+with tab8:
+    st.subheader("Cost & Impact ")
+    st.caption("Turns incidents into an estimated cost burden and highlights cost drivers (transparent assumptions).")
+
+    recruiter_mode_8 = st.toggle("Explanation mode ", value=True, key="rec_mode_8")
+    if recruiter_mode_8:
+        st.info(
+            "**What this is :**\n\n"
+            "A practical estimator that converts incidents into an **estimated cost impact**.\n"
+            "EHS teams use this to explain why certain hazards need budget and fast action."
+        )
+
+    if COST_EST_PATH.exists():
+        cost_df = load_csv_safely(COST_EST_PATH)
+        if "cost_estimate" not in cost_df.columns:
+            st.error("Found cost_estimates.csv but it has no `cost_estimate` column.")
+            cost_df = None
+    else:
+        cost_df = None
+
+    if cost_df is None:
+        st.warning(
+            "No `outputs/cost_estimates.csv` found yet.\n\n"
+            "Run locally:\n"
+            "`python src/08_cost_model.py`\n\n"
+            "Then commit/push `outputs/cost_estimates.csv` so it also works on Streamlit Cloud."
+        )
+
+        st.markdown("### Live fallback (computed in-app)")
+        st.caption("This uses fixed assumptions. Replace numbers with your company’s rates if needed.")
+
+        BASE_ADMIN = st.number_input("Base admin cost per record", min_value=0.0, value=250.0, step=50.0)
+        INSPECTION_COST = st.number_input("Inspection handling cost", min_value=0.0, value=1500.0, step=100.0)
+        HOSPITAL_COST = st.number_input("Hospitalization cost estimate", min_value=0.0, value=35000.0, step=1000.0)
+        AMPUTATION_COST = st.number_input("Amputation cost estimate", min_value=0.0, value=120000.0, step=5000.0)
+
+        tmp = df_filtered.copy()
+        tmp["_hosp"] = _to01(tmp[hospital_col]) if hospital_col else 0
+        tmp["_amp"] = _to01(tmp[amputation_col]) if amputation_col else 0
+        tmp["_insp"] = _to01(tmp[inspection_col]) if inspection_col else 0
+
+        tmp["cost_estimate"] = (
+            BASE_ADMIN
+            + tmp["_insp"] * INSPECTION_COST
+            + tmp["_hosp"] * HOSPITAL_COST
+            + tmp["_amp"] * AMPUTATION_COST
+        )
+        cost_df = tmp
+
+    total_cost = float(cost_df["cost_estimate"].fillna(0).sum())
+    avg_cost = float(cost_df["cost_estimate"].fillna(0).mean()) if len(cost_df) else 0.0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Estimated total cost (filtered)", f"{total_cost:,.0f}")
+    c2.metric("Average cost per record", f"{avg_cost:,.0f}")
+    c3.metric("Records used", f"{len(cost_df):,}")
+
+    st.divider()
+    st.markdown("### Cost distribution")
+    fig = px.histogram(cost_df, x="cost_estimate", nbins=40)
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.markdown("### Top cost drivers (grouped)")
+    group_choice = st.selectbox(
+        "Group by",
+        options=["State", "Industry / NAICS", "Injury / Nature type"],
+        index=0,
+        key="cost_group_by",
+    )
+
+    if group_choice == "State" and state_col and state_col in cost_df.columns:
+        grp_col = state_col
+        label = "State"
+    elif group_choice == "Industry / NAICS" and industry_col and industry_col in cost_df.columns:
+        grp_col = industry_col
+        label = "Industry / NAICS"
+    elif group_choice == "Injury / Nature type" and injury_col and injury_col in cost_df.columns:
+        grp_col = injury_col
+        label = "Injury / Nature"
+    else:
+        grp_col = None
+        st.info("That grouping column is not available in your dataset.")
+
+    if grp_col:
+        top_cost = (
+            cost_df.groupby(grp_col)["cost_estimate"]
+            .sum()
+            .sort_values(ascending=False)
+            .head(15)
+            .reset_index()
+        )
+        top_cost.columns = [label, "estimated_total_cost"]
+        fig2 = px.bar(top_cost, x="estimated_total_cost", y=label, orientation="h")
+        st.plotly_chart(fig2, use_container_width=True)
+        st.dataframe(top_cost, use_container_width=True)
+
+    st.divider()
+    st.download_button(
+        "Download cost estimates (CSV)",
+        data=cost_df.to_csv(index=False).encode("utf-8"),
+        file_name="cost_estimates_filtered.csv",
+        mime="text/csv",
+    )
+
+# -----------------------------
+# Tab 9: Workflow Queue (9) — NON-ML
+# -----------------------------
+with tab9:
+    st.subheader("Workflow Queue ")
+    st.caption("A realistic incident triage queue: priority + SLA + owner.")
+
+    recruiter_mode_9 = st.toggle("Explanation mode ", value=True, key="rec_mode_9")
+    if recruiter_mode_9:
+        st.info(
+            "**What this is :**\n\n"
+            "This turns incidents into a **work queue** for an EHS team:\n"
+            "**Priority → SLA → Owner** so the team knows what to act on first."
+        )
+
+    if WORKFLOW_PATH.exists():
+        wf = load_csv_safely(WORKFLOW_PATH)
+        if not {"priority", "sla", "owner"}.issubset(set(wf.columns)):
+            st.error("Found workflow_queue.csv but required columns are missing (priority/sla/owner).")
+            wf = None
+    else:
+        wf = None
+
+    if wf is None:
+        st.warning(
+            "No `outputs/workflow_queue.csv` found yet.\n\n"
+            "Run locally:\n"
+            "`python src/09_workflow_sim.py`\n\n"
+            "Then commit/push `outputs/workflow_queue.csv` so it works on Streamlit Cloud."
+        )
+
+        tmp = df_filtered.copy()
+        tmp["_hosp"] = _to01(tmp[hospital_col]) if hospital_col else 0
+        tmp["_amp"] = _to01(tmp[amputation_col]) if amputation_col else 0
+        tmp["_insp"] = _to01(tmp[inspection_col]) if inspection_col else 0
+
+        def _triage_row(r):
+            if int(r["_amp"]) == 1:
+                return "P1", "0–4 hours", "EHS Lead + Site Supervisor"
+            if int(r["_hosp"]) == 1:
+                return "P2", "Within 24 hours", "EHS Specialist / Coordinator"
+            if int(r["_insp"]) == 1:
+                return "P3", "Within 7 days", "Supervisor + EHS (weekly review)"
+            return "P4", "Monthly review", "Supervisor (with EHS oversight)"
+
+        tri = tmp.apply(lambda r: pd.Series(_triage_row(r), index=["priority", "sla", "owner"]), axis=1)
+        wf = pd.concat([tmp, tri], axis=1)
+
+    p_counts = wf["priority"].value_counts(dropna=False).to_dict() if "priority" in wf.columns else {}
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total in queue", f"{len(wf):,}")
+    c2.metric("P1", f"{p_counts.get('P1', 0):,}")
+    c3.metric("P2", f"{p_counts.get('P2', 0):,}")
+    c4.metric("P3+P4", f"{(p_counts.get('P3', 0) + p_counts.get('P4', 0)):,}")
+
+    st.divider()
+    st.markdown("### Queue view")
+
+    order = {"P1": 0, "P2": 1, "P3": 2, "P4": 3}
+    wf["_rank"] = wf["priority"].map(order).fillna(9).astype(int)
+
+    top_n = st.slider("Show top N records", min_value=10, max_value=300, value=50, step=10, key="wf_top_n")
+    wf_view = wf.sort_values(["_rank"], ascending=True).head(top_n)
+
+    show_cols = []
+    for c in [state_col, industry_col, injury_col, event_title_col, source_title_col]:
+        if c and c in wf_view.columns:
+            show_cols.append(c)
+
+    for c in ["priority", "sla", "owner"]:
+        if c in wf_view.columns:
+            show_cols.append(c)
+
+    for c in [hospital_col, amputation_col, inspection_col]:
+        if c and c in wf_view.columns and c not in show_cols:
+            show_cols.append(c)
+
+    st.dataframe(wf_view[show_cols], use_container_width=True)
+
+    st.download_button(
+        "Download workflow queue (CSV)",
+        data=wf.sort_values(["_rank"]).drop(columns=["_rank"], errors="ignore").to_csv(index=False).encode("utf-8"),
+        file_name="workflow_queue.csv",
         mime="text/csv",
     )
 

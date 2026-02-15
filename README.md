@@ -102,4 +102,3 @@ OSHA Severe Injury Reports (Public dataset, Kaggle)
 
 ---
 
-## Repository Structure (expected)
